@@ -1,0 +1,72 @@
+name: CD
+
+# Merge to main  ->  deploy to QA + run the pipeline there as an integration test
+#                ->  a human approves (GitHub environment "prod" has a required reviewer)
+#                ->  deploy the SAME commit to prod. Prod retrains on prod data (deploy-code).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_setup:
+        description: "Bootstrap the environment (run the setup job) - first deployment only"
+        type: boolean
+        default: false
+
+jobs:
+  deploy-qa:
+    runs-on: ubuntu-latest
+    environment: qa                     # QA service principal secrets live on this environment
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: databricks/setup-cli@main
+
+      - name: Deploy bundle to QA
+        run: databricks bundle deploy -t qa --var="git_sha=${{ github.sha }}"
+
+      - name: Bootstrap QA (first time only)
+        if: ${{ inputs.run_setup }}
+        run: databricks bundle run setup -t qa
+
+      - name: Integration test - daily pipeline end to end
+        run: databricks bundle run daily_forecast -t qa
+
+      - name: Integration test - training, registration and promotion logic
+        run: databricks bundle run training -t qa --params trigger=ci
+
+  deploy-prod:
+    needs: deploy-qa
+    runs-on: ubuntu-latest
+    environment: prod                   # required reviewer = manual approval gate; PROD principal secrets
+    permissions:
+      contents: write                   # push the release tag
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: databricks/setup-cli@main
+
+      - name: Deploy bundle to prod
+        run: databricks bundle deploy -t prod --var="git_sha=${{ github.sha }}"
+
+      - name: Bootstrap prod (first time only)
+        if: ${{ inputs.run_setup }}
+        run: databricks bundle run setup -t prod
+
+      - name: Tag release from version.txt
+        run: |
+          VERSION="v$(cat version.txt)"
+          if git ls-remote --exit-code --tags origin "$VERSION" >/dev/null; then
+            echo "::warning::Tag $VERSION already exists - bump version.txt for the next release"
+          else
+            git tag "$VERSION" && git push origin "$VERSION"
+          fi

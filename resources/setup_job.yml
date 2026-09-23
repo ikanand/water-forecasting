@@ -1,0 +1,76 @@
+# One-time bootstrap per environment: schemas -> history -> bronze -> quality -> silver
+# -> features -> first model (@champion) -> first forecast. Safe to re-run.
+resources:
+  jobs:
+    setup:
+      name: water-forecasting-setup
+      tags: { project: water_forecasting, job_type: setup }
+      max_concurrent_runs: 1
+      environments: &env
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: create_schemas
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/00_setup.py
+            parameters: &common
+              ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+               "--git_sha", "${var.git_sha}", "--job_run_id", "{{job.run_id}}"]
+
+        - task_key: land_history
+          depends_on: [{ task_key: create_schemas }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/01_land_source.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}", "--mode", "backfill"]
+
+        - task_key: ingest_bronze
+          depends_on: [{ task_key: land_history }]
+          environment_key: default
+          spark_python_task: { python_file: ../scripts/02_ingest_bronze.py, parameters: *common }
+
+        - task_key: quality_gate
+          depends_on: [{ task_key: ingest_bronze }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/03_quality_gate.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+                         "--job_run_id", "{{job.run_id}}", "--allow_no_new_data"]
+
+        - task_key: dq_passed
+          depends_on: [{ task_key: quality_gate }]
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.quality_gate.values.dq_passed}}"
+            right: "true"
+
+        - task_key: build_features
+          depends_on: [{ task_key: dq_passed, outcome: "true" }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/04_build_features.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}", "--mode", "backfill"]
+
+        - task_key: train_initial
+          depends_on: [{ task_key: build_features }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/05_train.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+                         "--git_sha", "${var.git_sha}", "--job_run_id", "{{job.run_id}}", "--trigger", "initial"]
+
+        - task_key: first_forecast
+          depends_on: [{ task_key: train_initial }]
+          environment_key: default
+          spark_python_task: { python_file: ../scripts/06_forecast.py, parameters: *common }
+
+        - task_key: blocked
+          depends_on: [{ task_key: dq_passed, outcome: "false" }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/99_fail.py
+            parameters: ["--message", "setup data failed quality checks"]

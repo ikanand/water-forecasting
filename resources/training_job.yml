@@ -1,0 +1,33 @@
+# Weekly safety-net retrain (Sunday 03:00) + on demand + triggered by monitoring on degradation.
+# Trains every candidate family, logs to MLflow, registers the winner as @challenger and
+# promotes it to @champion only if it beats the current champion on the same holdout.
+resources:
+  jobs:
+    training:
+      name: water-forecasting-training
+      tags: { project: water_forecasting, job_type: training }
+      max_concurrent_runs: 1
+      timeout_seconds: 7200
+      schedule:
+        quartz_cron_expression: "0 0 3 ? * SUN"
+        timezone_id: UTC
+        pause_status: ${var.schedule_pause_status}
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      parameters:
+        - name: trigger        # scheduled | degradation | manual | ci
+          default: scheduled
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: train_register_promote
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/05_train.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+                         "--git_sha", "${var.git_sha}", "--job_run_id", "{{job.run_id}}",
+                         "--trigger", "{{job.parameters.trigger}}"]

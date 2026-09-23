@@ -1,0 +1,43 @@
+# After the day's actuals have landed: reconcile yesterday's forecast vs actuals,
+# update accuracy tables, and trigger retraining if accuracy degraded N days in a row.
+# (In production this runs "nightly" once meters close the day; in the replay demo the
+#  actuals arrive with the 05:00 ingest, so it runs at 06:30.)
+resources:
+  jobs:
+    monitoring:
+      name: water-forecasting-monitoring
+      tags: { project: water_forecasting, job_type: monitoring }
+      max_concurrent_runs: 1
+      schedule:
+        quartz_cron_expression: "0 30 6 * * ?"
+        timezone_id: UTC
+        pause_status: ${var.schedule_pause_status}
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: reconcile_and_monitor
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/07_monitor.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+                         "--job_run_id", "{{job.run_id}}"]
+
+        - task_key: needs_retrain
+          depends_on: [{ task_key: reconcile_and_monitor }]
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.reconcile_and_monitor.values.needs_retrain}}"
+            right: "true"
+
+        - task_key: trigger_retraining
+          depends_on: [{ task_key: needs_retrain, outcome: "true" }]
+          run_job_task:
+            job_id: ${resources.jobs.training.id}
+            job_parameters:
+              trigger: degradation

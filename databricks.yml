@@ -1,0 +1,62 @@
+# Databricks Asset Bundle: ONE definition of every job, deployed to THREE targets.
+# All targets share one workspace; each environment is isolated by its own Unity Catalog
+# catalog (water_dev / water_qa / water_prod, chosen in project_config.yml by --env)
+# and - in qa/prod - by its own service principal (see README > Security).
+
+bundle:
+  name: water-forecasting
+
+include:
+  - resources/*.yml
+
+# src/ is built into a wheel and installed on serverless compute, so every environment
+# runs exactly the same versioned code (deploy-code pattern: promote code, not models).
+artifacts:
+  default:
+    type: whl
+    build: uv build --wheel
+    path: .
+    dynamic_version: true
+
+variables:
+  git_sha:
+    description: Commit being deployed (set by CI/CD)
+    default: local
+  schedule_pause_status:
+    description: Daily/weekly crons. PAUSED except in prod - dev/qa run on demand.
+    default: PAUSED
+  refresh_pause_status:
+    description: Quarterly prod->lower-env refresh. Runs in qa only (dev mode pauses all schedules).
+    default: PAUSED
+  alert_email:
+    description: Who gets paged when a job fails or a quality gate blocks the pipeline
+    default: mlops-alerts@example.com
+
+targets:
+  dev:
+    mode: development          # prefixes resources with [dev <user>], pauses all schedules
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+  qa:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com   # same workspace, different catalog
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      refresh_pause_status: UNPAUSED
+    # Deployed by the QA service principal from GitHub Actions (environment "qa").
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      schedule_pause_status: UNPAUSED    # only prod runs on a live schedule
+    # Deployed by the PROD service principal (GitHub environment "prod", manual approval).
+    # Jobs run as the deploying identity; to pin it explicitly:
+    # run_as:
+    #   service_principal_name: <prod-sp-application-id>

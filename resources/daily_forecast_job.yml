@@ -1,0 +1,73 @@
+# 05:00 every day: receive new data -> bronze -> QUALITY GATE -> silver -> features -> forecast tomorrow.
+#
+#   land_source -> ingest_bronze -> quality_gate -> dq_passed? --true--> build_features -> forecast
+#                                                             \--false-> blocked (fails the run, alerts)
+resources:
+  jobs:
+    daily_forecast:
+      name: water-forecasting-daily
+      tags: { project: water_forecasting, job_type: daily_forecast }
+      max_concurrent_runs: 1
+      timeout_seconds: 3600
+      schedule:
+        quartz_cron_expression: "0 0 5 * * ?"
+        timezone_id: UTC
+        pause_status: ${var.schedule_pause_status}
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
+      parameters:
+        - name: fault          # demo: none | missing_forecast | meter_outage
+          default: none
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: land_source
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/01_land_source.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+                         "--mode", "daily", "--fault", "{{job.parameters.fault}}"]
+
+        - task_key: ingest_bronze
+          depends_on: [{ task_key: land_source }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/02_ingest_bronze.py
+            parameters: &common
+              ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}",
+               "--git_sha", "${var.git_sha}", "--job_run_id", "{{job.run_id}}"]
+
+        - task_key: quality_gate
+          depends_on: [{ task_key: ingest_bronze }]
+          environment_key: default
+          spark_python_task: { python_file: ../scripts/03_quality_gate.py, parameters: *common }
+
+        - task_key: dq_passed
+          depends_on: [{ task_key: quality_gate }]
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.quality_gate.values.dq_passed}}"
+            right: "true"
+
+        - task_key: build_features
+          depends_on: [{ task_key: dq_passed, outcome: "true" }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/04_build_features.py
+            parameters: ["--root_path", "${workspace.root_path}", "--env", "${bundle.target}", "--mode", "incremental"]
+
+        - task_key: forecast
+          depends_on: [{ task_key: build_features }]
+          environment_key: default
+          spark_python_task: { python_file: ../scripts/06_forecast.py, parameters: *common }
+
+        - task_key: blocked
+          depends_on: [{ task_key: dq_passed, outcome: "false" }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../scripts/99_fail.py
+            parameters: ["--message", "data quality gate failed - forecast NOT produced"]

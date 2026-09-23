@@ -1,0 +1,73 @@
+# Runtime configuration. Shared settings at the top; per-environment overrides under `environments`.
+# Scripts load it with ProjectConfig.from_yaml(path, env) where env = ${bundle.target}.
+
+project_name: water_forecasting
+zones: [north, central, south]          # supply zones / DMAs being forecast
+
+schemas:
+  landing: landing        # mock "source systems" (SCADA meters, weather API, calendars)
+  bronze: bronze          # raw, append-only, + _ingested_at / _batch_id
+  silver: silver          # validated, deduplicated, conformed hourly grid
+  gold: gold              # feature table + forecasts
+  ml: ml                  # registered models
+  monitoring: monitoring  # DQ results, quarantine, accuracy, model selection leaderboard
+
+source:
+  mode: synthetic         # synthetic | files  (files = replay your own CSVs from a UC volume)
+  files_volume: raw_files # /Volumes/<catalog>/landing/<files_volume>/*.csv when mode=files
+  seed: 42
+  inject_anomaly_rate: 0.002   # tiny rate of duplicates / negatives so quarantine has something to show
+
+forecast:
+  issue_hour_utc: 5       # forecasts are issued at 05:00 for the whole of tomorrow
+  horizon_hours: 24
+  min_lag_hours: 48       # lags must be >= 48h: at issue time the newest complete day is D-1
+
+model:
+  registered_model: water_demand_forecast
+  candidates: [seasonal_naive_168, ridge_fourier, lightgbm]
+  holdout_days: 28
+  ridge_alpha: 1.0
+  lgbm_params:
+    n_estimators: 600
+    learning_rate: 0.03
+    num_leaves: 31
+    min_child_samples: 40
+    subsample: 0.8
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    random_state: 42
+    verbose: -1
+
+decisions:
+  min_improvement_pct: 1.0      # challenger must beat champion MAPE by >= 1% (relative)
+  max_acceptable_mape: 15.0     # never promote a model worse than this, even with no champion
+  degradation_factor: 1.25      # retrain when daily MAPE > 1.25 x champion holdout MAPE ...
+  degradation_days: 3           # ... for 3 consecutive days
+
+quality:
+  consumption_min_m3: 0.0
+  consumption_max_m3: 20000.0
+  temperature_min_c: -30.0
+  temperature_max_c: 50.0
+  max_missing_hours_pct: 2.0    # blocking: more missing hours than this in a batch stops the pipeline
+
+environments:
+  dev:
+    catalog: water_dev
+    history_start: "2025-03-01"   # small slice: fast iteration
+    history_end: "2025-12-31"
+  qa:
+    catalog: water_qa
+    history_start: "2024-09-01"   # >= 1 full seasonal cycle so tests cover summer and winter
+    history_end: "2025-12-31"
+  prod:
+    catalog: water_prod
+    history_start: "2023-01-01"   # full history
+    history_end: "2025-12-31"
+
+refresh:                          # quarterly prod -> dev/qa subset copy (see resources/refresh_job.yml)
+  source_catalog: water_prod
+  lookback_days:
+    dev: 180
+    qa: 400

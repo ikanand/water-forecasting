@@ -15,9 +15,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          activate-environment: true   # a project venv; the runner's system Python is externally managed
 
       - name: Install
-        run: uv pip install --system -e ".[test]"
+        run: uv pip install -e ".[test]"
 
       - name: Lint
         run: ruff check . && ruff format --check .

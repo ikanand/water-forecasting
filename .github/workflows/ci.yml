@@ -37,8 +37,12 @@ jobs:
     # workspace, as the QA principal. Prod is validated by its own principal at deploy time (a target can
     # only be validated by its run_as identity because its dashboard embeds that identity's credentials);
     # tests/test_bundle_config.py guards the prod definition in the unit tests above.
+    #
+    # Uses "qa-ci" rather than "qa": same read-only-here credentials, but without qa's main-only branch
+    # policy, which exists to gate real deployments (cd.yml) and would otherwise block this check on
+    # every PR branch. Keep the two environments' secrets in sync if the qa service principal rotates.
     runs-on: ubuntu-latest
-    environment: qa
+    environment: qa-ci
     env:
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}

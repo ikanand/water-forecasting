@@ -1,8 +1,11 @@
 """Pipeline steps called by the job scripts: land -> bronze -> quality gate -> silver -> features
 -> forecast -> reconcile/monitor, plus the quarterly prod -> lower-env refresh.
 
-Clock: "today" is the local calendar day (config forecast.timezone). Only complete days are landed;
-an environment that is behind catches up one day per daily run (see clock.py)."""
+Clock: "today" is the local calendar day (config forecast.timezone). Only complete days are landed.
+Self-healing: land_source lands the WHOLE gap up to yesterday in one call (not just the next single
+day), and forecast()/monitor() loop over every day still owed a forecast or a reconciliation. A run
+that was missed does not leave the environment permanently behind - the next successful run catches
+up completely and backfills the forecast/accuracy history for the days in between."""
 
 from __future__ import annotations
 
@@ -80,7 +83,11 @@ def _warehouse_frames(spark, cfg: ProjectConfig, start, end, now_local: pd.Times
             f"timestamp_local >= '{start}' AND timestamp_local < '{end + 2 * ONE_DAY}' "
             f"AND forecast_issued_local <= '{now_local}'",
         ),
-        "calendar": pull(w.calendar_table, ["date"], f"date >= '{start.date()}' AND date < '{end.date()}'"),
+        # +2 days too: calendar facts (holidays, Ramadan, events) are known well in advance in reality,
+        # and the target day's row must be in silver before build_features runs for it (see quality_gate).
+        "calendar": pull(
+            w.calendar_table, ["date"], f"date >= '{start.date()}' AND date < '{(end + 2 * ONE_DAY).date()}'"
+        ),
     }
 
 
@@ -99,7 +106,7 @@ def _files_frames(cfg: ProjectConfig, start, end, now_local: pd.Timestamp) -> di
         "weather_fcst": f[
             (f.timestamp_local >= start) & (f.timestamp_local < fcst_end) & (f.forecast_issued_local <= now_local)
         ],
-        "calendar": cal[(cal.date >= start) & (cal.date < end)],
+        "calendar": cal[(cal.date >= start) & (cal.date < fcst_end)],
     }
 
 
@@ -117,7 +124,9 @@ def land_source(spark, cfg: ProjectConfig, mode: str, fault: str = "none") -> st
     """Pull complete days from the source system into landing.
 
     backfill: the configured history window (capped at yesterday); skipped if anything is landed.
-    daily:    the next complete day after the newest landed one - or nothing if already up to date.
+    daily:    every complete day after the newest landed one, through yesterday, in one batch - or
+              nothing if already up to date. Landing the whole gap (not just the next single day) is
+              what makes the pipeline self-healing after a missed run.
     """
     now_local = clock.local_now(cfg.forecast.timezone)
     today = now_local.normalize()
@@ -131,7 +140,7 @@ def land_source(spark, cfg: ProjectConfig, mode: str, fault: str = "none") -> st
         if day is None:
             log.info("Source up to date: every complete day before %s is already landed.", today.date())
             return "up_to_date"
-        start = end = day
+        start, end = day, today - ONE_DAY
 
     if cfg.source.mode == "warehouse":
         frames = _warehouse_frames(spark, cfg, start, end, now_local)
@@ -160,8 +169,10 @@ def ingest_bronze(spark, cfg: ProjectConfig) -> None:
         if not exists(spark, dst):
             spark.sql(f"CREATE TABLE {dst} AS SELECT *, TIMESTAMP'{ts}' AS _ingested_at FROM {src}")
         else:
+            # BY NAME: matches columns by name, not position - a landing schema change (e.g. a new
+            # calendar column) does not silently shift data into the wrong bronze column.
             spark.sql(
-                f"INSERT INTO {dst} SELECT *, TIMESTAMP'{ts}' AS _ingested_at FROM {src} s "
+                f"INSERT INTO {dst} BY NAME SELECT *, TIMESTAMP'{ts}' AS _ingested_at FROM {src} s "
                 f"WHERE NOT EXISTS (SELECT 1 FROM {dst} b WHERE b._batch_id = s._batch_id)"
             )
         log.info("bronze %s up to date", key)
@@ -235,7 +246,13 @@ def build_features(spark, cfg: ProjectConfig, mode: str) -> None:
         )
         first = first.normalize() + pd.Timedelta(days=21)  # 3 weeks of warm-up for the longest lag
     else:
-        first = today - 2 * ONE_DAY  # recompute recent days + tomorrow only
+        # Recompute recent days (late corrections) + tomorrow, and reach back further if land_source
+        # just caught up several days at once - every day since the last forecast needs one too.
+        first = today - 2 * ONE_DAY
+        if exists(spark, s(Tables.FORECASTS)):
+            last_forecast = spark.sql(f"SELECT max(to_date(target_ts)) m FROM {s(Tables.FORECASTS)}").first()["m"]
+            if last_forecast is not None:
+                first = min(first, pd.Timestamp(last_forecast) + ONE_DAY)
     lookback = first - pd.Timedelta(days=30)
 
     cons = read_pdf(spark, s(Tables.SILVER_CONSUMPTION), f"timestamp_local >= '{lookback}'")
@@ -255,23 +272,41 @@ def build_features(spark, cfg: ProjectConfig, mode: str) -> None:
 
 # ----------------------------------------------------------- 5. forecast ----
 def forecast(spark, cfg: ProjectConfig, run_id: str) -> None:
+    """Issue a forecast for every target day that does not have one yet, up to tomorrow. Normally
+    that is exactly one day; after land_source catches up several days at once, it is several -
+    each with the issued_at timestamp it would have had if issued on its own day."""
     from water_forecasting.registry import load_alias
 
     today = sim_today(spark, cfg)
-    target_day = today + ONE_DAY
-    X = read_pdf(spark, cfg.table(Tables.FEATURES), f"to_date(target_ts) = '{target_day.date()}'")
-    expected = cfg.forecast.horizon_hours
-    if len(X) != expected:
-        raise RuntimeError(f"Expected {expected} feature rows for {target_day.date()}, found {len(X)}")
+    final_target = today + ONE_DAY
+    first_target = final_target
+    if exists(spark, cfg.table(Tables.FORECASTS)):
+        last_forecast = spark.sql(f"SELECT max(to_date(target_ts)) m FROM {cfg.table(Tables.FORECASTS)}").first()["m"]
+        if last_forecast is not None:
+            first_target = min(final_target, pd.Timestamp(last_forecast) + ONE_DAY)
 
     model, version = load_alias(cfg, "champion")
     if model is None:
         raise RuntimeError(f"No @champion for {cfg.registered_model_name} - run the training job first.")
+
+    # One read, one prediction batch, one write for the whole range - not N Spark round-trips.
+    X = read_pdf(
+        spark,
+        cfg.table(Tables.FEATURES),
+        f"to_date(target_ts) >= '{first_target.date()}' AND to_date(target_ts) <= '{final_target.date()}'",
+    )
+    n_days = (final_target - first_target).days + 1
+    expected = cfg.forecast.horizon_hours * n_days
+    if len(X) != expected:
+        raise RuntimeError(
+            f"Expected {expected} feature rows for {first_target.date()}..{final_target.date()}, found {len(X)}"
+        )
+    day = X.target_ts.dt.normalize()
     out = X[F.KEYS].copy()
     out["predicted_m3"] = model.predict(X[F.model_columns()]).round(3)
     out = out.assign(
         forecast_run_id=run_id,
-        issued_at=today + pd.Timedelta(hours=cfg.forecast.issue_hour_utc),
+        issued_at=(day - ONE_DAY) + pd.Timedelta(hours=cfg.forecast.issue_hour_utc),
         model_name=cfg.registered_model_name,
         model_version=str(version.version),
         model_family=version.tags.get("family", "unknown"),
@@ -279,34 +314,60 @@ def forecast(spark, cfg: ProjectConfig, run_id: str) -> None:
         created_at=pd.Timestamp.now(tz="UTC").tz_localize(None),
     )
     append_pdf(spark, out, cfg.table(Tables.FORECASTS))  # append-only: the audit trail of every claim
-    log.info(
-        "Forecast for %s written with model v%s (total %.0f m3)",
-        target_day.date(),
-        version.version,
-        out.predicted_m3.sum(),
-    )
+    for d, g in out.groupby(day):
+        log.info(
+            "Forecast for %s written with model v%s (total %.0f m3)", d.date(), version.version, g.predicted_m3.sum()
+        )
 
 
 # ------------------------------------------------------------ 6. monitor ----
 def monitor(spark, cfg: ProjectConfig) -> tuple[bool, str]:
-    """Nightly reconciliation: yesterday's forecasts vs the actuals that have now landed."""
+    """Reconcile every day whose forecast has not been scored yet, up to yesterday (the newest day
+    with complete actuals). Normally that is one day; after a catch-up it can be several."""
     from water_forecasting.registry import get_alias_version
 
-    day = sim_today(spark, cfg) - ONE_DAY
-    f_tbl = cfg.table(Tables.FORECASTS)
+    last_complete = sim_today(spark, cfg) - ONE_DAY
+    f_tbl, d_tbl = cfg.table(Tables.FORECASTS), cfg.table(Tables.DAILY_ACCURACY)
     if not exists(spark, f_tbl):
         return False, "no forecasts yet"
-    fc = read_pdf(spark, f_tbl, f"to_date(target_ts) = '{day.date()}'")
-    act = read_pdf(spark, cfg.table(Tables.SILVER_CONSUMPTION), f"to_date(timestamp_local) = '{day.date()}'")
-    hourly = reconcile(fc, act, day)
-    if hourly.empty:
-        log.info("Nothing to reconcile for %s (no forecast was issued for it).", day.date())
+    if exists(spark, d_tbl):
+        last_reconciled = spark.sql(f"SELECT max(forecast_date) m FROM {d_tbl}").first()["m"]
+        first_day = min(last_complete, pd.Timestamp(last_reconciled) + ONE_DAY) if last_reconciled else last_complete
     else:
-        merge_pdf(spark, hourly, cfg.table(Tables.FORECAST_ACCURACY), ["target_ts"])
-        merge_pdf(spark, daily_summary(hourly), cfg.table(Tables.DAILY_ACCURACY), ["forecast_date"])
-        log.info("Reconciled %s: MAPE %.2f%%", day.date(), hourly.abs_pct_error.mean())
+        # First-ever monitoring run: no accuracy history to resume from, so start at the earliest
+        # forecasted day rather than just yesterday - otherwise a catch-up's backlog of forecasts
+        # would silently never be reconciled.
+        earliest = spark.sql(f"SELECT min(to_date(target_ts)) m FROM {f_tbl}").first()["m"]
+        first_day = min(last_complete, pd.Timestamp(earliest)) if earliest else last_complete
 
-    d_tbl = cfg.table(Tables.DAILY_ACCURACY)
+    if first_day <= last_complete:
+        # One read and one MERGE for the whole backlog - a MERGE per day gets slower as the target
+        # table grows, so a wide catch-up must not do N of them.
+        fc = read_pdf(
+            spark,
+            f_tbl,
+            f"to_date(target_ts) >= '{first_day.date()}' AND to_date(target_ts) <= '{last_complete.date()}'",
+        )
+        lo, hi = first_day.date(), last_complete.date()
+        act = read_pdf(
+            spark,
+            cfg.table(Tables.SILVER_CONSUMPTION),
+            f"to_date(timestamp_local) >= '{lo}' AND to_date(timestamp_local) <= '{hi}'",
+        )
+        per_day = [reconcile(fc, act, day) for day in pd.date_range(first_day, last_complete)]
+        per_day = [h for h in per_day if not h.empty]
+        if per_day:
+            hourly = pd.concat(per_day, ignore_index=True)
+            merge_pdf(spark, hourly, cfg.table(Tables.FORECAST_ACCURACY), ["target_ts"])
+            merge_pdf(spark, daily_summary(hourly), cfg.table(Tables.DAILY_ACCURACY), ["forecast_date"])
+            for day, g in hourly.groupby("forecast_date"):
+                log.info("Reconciled %s: MAPE %.2f%%", pd.Timestamp(day).date(), g.abs_pct_error.mean())
+        else:
+            log.info(
+                "Nothing to reconcile for %s..%s (no forecast was issued for it).",
+                first_day.date(),
+                last_complete.date(),
+            )
     recent = [] if not exists(spark, d_tbl) else read_pdf(spark, d_tbl).sort_values("forecast_date").mape.tolist()
     champ = get_alias_version(cfg, "champion")
     baseline = float(champ.tags["holdout_mape"]) if champ and "holdout_mape" in champ.tags else None

@@ -7,6 +7,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -34,14 +37,18 @@ jobs:
     # workspace, as the QA principal. Prod is validated by its own principal at deploy time (a target can
     # only be validated by its run_as identity because its dashboard embeds that identity's credentials);
     # tests/test_bundle_config.py guards the prod definition in the unit tests above.
+    #
+    # Uses "qa-ci" rather than "qa": same read-only-here credentials, but without qa's main-only branch
+    # policy, which exists to gate real deployments (cd.yml) and would otherwise block this check on
+    # every PR branch. Keep the two environments' secrets in sync if the qa service principal rotates.
     runs-on: ubuntu-latest
-    environment: qa
+    environment: qa-ci
     env:
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
-      - uses: databricks/setup-cli@main
+      - uses: databricks/setup-cli@main   # tracks latest; pin to a release tag/SHA for a stricter supply chain
       - name: Validate the qa bundle
         run: databricks bundle validate -t qa

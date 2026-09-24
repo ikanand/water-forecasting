@@ -65,8 +65,8 @@ to 0, because growth cannot be separated from one annual cycle (this protects de
 | Research only: ensemble LightGBM-trend + SARIMAX + MLP | 2.51 % | -0.11 % | 2.56 % | 1.72 % |
 | Seasonal naive (same hour last week) | 5.94 % | -0.04 % | 5.51 % | 4.67 % |
 
-By segment (research ensemble; the shipped blend behaves similarly): weekdays 2.4 %, weekends 2.6 %,
-Ramadan 2.7 %, Eid days 3.0 % (previous production: 6.2 %).
+By segment, the shipped `blend_ridge_lgbm`: weekdays 2.45 %, weekends 2.74 %, Ramadan 2.96 %, Eid days 3.76 %
+(previous production: 6.19 % on Eid days). The research-only ensemble is a little better still on Eid (3.04 %).
 
 **First live checks (dev, catch-up at go-live):** reconciled daily MAPE 2.09 % (21 Sep), 1.45 % (22 Sep),
 4.14 % (23 Sep), using the dev champion trained on 8 months of history.

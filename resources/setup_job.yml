@@ -6,6 +6,9 @@ resources:
       name: water-forecasting-setup
       tags: { project: water_forecasting, job_type: setup }
       max_concurrent_runs: 1
+      timeout_seconds: 7200
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
       environments: &env
         - environment_key: default
           spec:

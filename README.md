@@ -48,7 +48,7 @@ flowchart LR
 | Deployed by | you, `databricks bundle deploy -t dev` | CD on merge to `main` | CD after **manual approval** |
 | Runs as | your user | `sp-water-qa` | `sp-water-prod` |
 | Schedules | paused (on demand) | paused (CD runs it) + quarterly refresh | **live** |
-| History | 2026-01-01 -> replay from 2026-06-30 | 2025-08-15 -> live | 2024-01-01 -> live |
+| History | 2026-01-01 -> replay from 2026-06-30 | 2024-09-15 -> live | 2024-01-01 -> live |
 | Purpose | development, fault drills | integration tests on every release | the forecast of record |
 
 ## 3. How the daily cycle works in real time
@@ -57,10 +57,16 @@ flowchart LR
 
 * **Only complete days are landed.** A day is complete once the Dubai calendar has moved past it; today is
   never landed, and no weather-forecast vintage issued after "now" is used.
-* **Catch-up is automatic.** An environment that is behind (fresh bootstrap, missed runs, refreshed lower env)
-  lands one day per daily run, and each run issues exactly the forecast that would have been issued that day.
+* **Catch-up is self-healing.** An environment that is behind (fresh bootstrap, missed runs, refreshed lower
+  env) lands the WHOLE gap up to yesterday in one run, and `forecast()` / `monitor()` loop over every day
+  still owed a forecast or a reconciliation - so a single missed run never leaves the pipeline permanently
+  behind, and the forecast/accuracy history for the skipped days is backfilled automatically.
 * **Freshness is measured against the wall clock.** A same-day re-run is a harmless no-op; a feed that stops
   delivering blocks the pipeline and alerts.
+* **Bounded by the demo data.** `mlops_dev.bronze` (the source used by every environment) ends 2026-09-30.
+  From 1 Oct the daily job blocks on `forecast_horizon_coverage` (no forecast vintage available) and alerts -
+  correct behaviour for an exhausted feed, not a bug. Point `source.warehouse` at a live extract to remove
+  this ceiling.
 
 Go-live (2026-09-24): prod was bootstrapped with history to 2026-09-19 and caught up with four daily runs,
 so `gold.demand_forecasts` holds the forecasts issued on 20-23 Sep plus today's, and the monitoring tables hold
@@ -74,7 +80,7 @@ reconciled errors for 21, 22 and 23 Sep. From then on the schedules below run ev
 | `daily_forecast` | daily 05:00 | land next complete day -> bronze -> **quality gate** -> features -> forecast for tomorrow; a failed gate runs `blocked`, which fails the run and alerts |
 | `monitoring` | daily 06:30 | reconcile yesterday's forecast with its actuals; if daily MAPE > 1.25x the champion's holdout MAPE for 3 consecutive days, trigger `training` |
 | `training` | Sundays 03:00 + on degradation / CI | fit all candidates, log to MLflow, register the best as `@challenger`, promote to `@champion` only if >= 1 % better on >= 7 holdout days the champion never trained on |
-| `refresh_from_prod` | quarterly (qa) | copy a contiguous window of prod silver to qa (400 days) / dev (180 days), retrain |
+| `refresh_from_prod` | quarterly (qa) | copy a contiguous window of prod silver to qa (730 days) / dev (180 days), retrain |
 
 Failure alerts go to `var.alert_email` (`databricks.yml`).
 
@@ -119,9 +125,11 @@ flowchart LR
   pipeline, monitoring and training there as integration tests; then wait for approval on the GitHub environment
   `prod`; then deploy prod as `sp-water-prod` and tag a release from `version.txt`.
   Manual inputs: `run_setup` (bootstrap) and `catch_up_days` (replay missed days).
-* **Guards:** `main` is protected (PR + green CI required); qa/prod targets deploy only from `main`
-  (`git.branch`) and always run as their service principal (`run_as`); `tests/test_bundle_config.py` fails if the
-  bundle and `project_config.yml` disagree on catalogs or if non-prod schedules are unpaused.
+* **Guards:** `main` is protected (the `test` and `validate-bundle` checks must pass before merging; this does
+  not require a second reviewer - a solo-maintainer setting - and the repo admin can bypass it, which a team
+  setting should turn off); qa/prod targets deploy only from `main` (`git.branch`) and always run as their
+  service principal (`run_as`); `tests/test_bundle_config.py` fails if the bundle and `project_config.yml`
+  disagree on catalogs or if non-prod schedules are unpaused.
 
 ## 8. Security
 

@@ -68,6 +68,7 @@ class QualityConfig(BaseModel):
     temperature_min_c: float = 0.0
     temperature_max_c: float = 50.0
     max_missing_hours_pct: float = 2.0
+    max_missing_hours_abs: int = 3
     frozen_min_hours: int = 3
 
 

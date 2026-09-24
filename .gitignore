@@ -10,3 +10,6 @@ build/
 .coverage
 local_output/
 mlruns/
+mlflow.db
+data/
+.ipynb_checkpoints/

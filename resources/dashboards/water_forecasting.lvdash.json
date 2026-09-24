@@ -1,0 +1,1376 @@
+{
+  "datasets": [
+    {
+      "name": "kpi",
+      "displayName": "kpi",
+      "queryLines": [
+        "SELECT\n",
+        "  (SELECT round(mape, 2) FROM monitoring.forecast_accuracy_daily ORDER BY forecast_date DESC LIMIT 1) AS last_day_mape,\n",
+        "  (SELECT round(avg(mape), 2) FROM (SELECT mape FROM monitoring.forecast_accuracy_daily\n",
+        "                                   ORDER BY forecast_date DESC LIMIT 7)) AS mape_7d,\n",
+        "  (SELECT count(*) FROM monitoring.forecast_accuracy_daily) AS days_reconciled,\n",
+        "  (SELECT date_format(max(timestamp_local), 'yyyy-MM-dd') FROM silver.demand_hourly) AS newest_actual_day,\n",
+        "  (SELECT date_format(max(to_date(target_ts)), 'yyyy-MM-dd') FROM gold.demand_forecasts) AS newest_forecast_day\n"
+      ]
+    },
+    {
+      "name": "tomorrow",
+      "displayName": "tomorrow",
+      "queryLines": [
+        "SELECT target_ts, predicted_m3, model_version, model_family, issued_at, created_at\n",
+        "FROM gold.demand_forecasts\n",
+        "WHERE to_date(target_ts) = (SELECT max(to_date(target_ts)) FROM gold.demand_forecasts)\n",
+        "QUALIFY row_number() OVER (PARTITION BY target_ts ORDER BY created_at DESC) = 1\n"
+      ]
+    },
+    {
+      "name": "fc_vs_actual",
+      "displayName": "fc vs actual",
+      "queryLines": [
+        "WITH fc AS (\n",
+        "  SELECT target_ts, predicted_m3 FROM gold.demand_forecasts\n",
+        "  WHERE target_ts >= (SELECT max(target_ts) - INTERVAL 14 DAYS FROM gold.demand_forecasts)\n",
+        "  QUALIFY row_number() OVER (PARTITION BY target_ts ORDER BY issued_at DESC, created_at DESC) = 1\n",
+        ")\n",
+        "SELECT target_ts AS ts, 'forecast' AS series, predicted_m3 AS m3h FROM fc\n",
+        "UNION ALL\n",
+        "SELECT timestamp_local AS ts, 'actual' AS series, demand_m3h AS m3h FROM silver.demand_hourly\n",
+        "WHERE timestamp_local >= (SELECT min(target_ts) FROM fc)\n"
+      ]
+    },
+    {
+      "name": "daily_accuracy",
+      "displayName": "daily accuracy",
+      "queryLines": [
+        "SELECT forecast_date, round(mape, 2) AS mape, round(wape, 2) AS wape, round(bias_pct, 2) AS bias_pct,\n",
+        "       round(max_abs_pct_error, 2) AS max_abs_pct_error, CAST(hours_scored AS INT) AS hours_scored\n",
+        "FROM monitoring.forecast_accuracy_daily ORDER BY forecast_date DESC\n"
+      ]
+    },
+    {
+      "name": "hourly_errors",
+      "displayName": "hourly errors",
+      "queryLines": [
+        "SELECT target_ts, round(predicted_m3, 0) AS predicted_m3, round(actual_m3, 0) AS actual_m3,\n",
+        "       round(error_m3, 0) AS error_m3, round(abs_pct_error, 2) AS abs_pct_error, model_version\n",
+        "FROM monitoring.forecast_accuracy_hourly ORDER BY target_ts DESC\n"
+      ]
+    },
+    {
+      "name": "dq_summary",
+      "displayName": "dq summary",
+      "queryLines": [
+        "SELECT concat(table_name, '.', check_name) AS check, CAST(sum(failed_rows) AS BIGINT) AS failed_rows,\n",
+        "       CAST(sum(CASE WHEN passed THEN 0 ELSE 1 END) AS BIGINT) AS failed_runs\n",
+        "FROM monitoring.dq_results GROUP BY 1 ORDER BY failed_rows DESC\n"
+      ]
+    },
+    {
+      "name": "dq_latest",
+      "displayName": "dq latest",
+      "queryLines": [
+        "SELECT checked_at, table_name, check_name, severity, passed, CAST(failed_rows AS BIGINT) AS failed_rows, detail\n",
+        "FROM monitoring.dq_results ORDER BY checked_at DESC, table_name, check_name LIMIT 200\n"
+      ]
+    },
+    {
+      "name": "quarantine",
+      "displayName": "quarantine",
+      "queryLines": [
+        "SELECT detected_at, table_name, reason, record_json FROM monitoring.dq_quarantine\n",
+        "ORDER BY detected_at DESC LIMIT 200\n"
+      ]
+    },
+    {
+      "name": "models",
+      "displayName": "models",
+      "queryLines": [
+        "SELECT trained_at, `trigger`, family, round(mape, 3) AS holdout_mape, round(peak_mape, 3) AS holdout_peak_mape,\n",
+        "       selected, promoted, registered_version, champion_version_before, decision\n",
+        "FROM monitoring.model_selection ORDER BY trained_at DESC, mape\n"
+      ]
+    },
+    {
+      "name": "models_latest",
+      "displayName": "models latest",
+      "queryLines": [
+        "SELECT family, round(mape, 3) AS holdout_mape FROM monitoring.model_selection\n",
+        "WHERE trained_at = (SELECT max(trained_at) FROM monitoring.model_selection) ORDER BY mape\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "operations",
+      "displayName": "Daily operations",
+      "layout": [
+        {
+          "widget": {
+            "name": "hdr_ops",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Dubai water demand - day-ahead forecast",
+                "Forecast issued every morning (05:00 UTC) for the 24 hours of tomorrow. Accuracy is reconciled nightly (06:30 UTC) once a day's actuals are complete. MAPE = mean absolute percentage error; backtested expectation for the current model is about 2.7 %."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_last",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpi",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "last_day_mape",
+                      "expression": "`last_day_mape`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "last_day_mape",
+                  "displayName": "MAPE - last reconciled day (%)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "MAPE - last reconciled day (%)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_7d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpi",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "mape_7d",
+                      "expression": "`mape_7d`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "mape_7d",
+                  "displayName": "MAPE - last 7 days (%)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "MAPE - last 7 days (%)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_days",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpi",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "days_reconciled",
+                      "expression": "`days_reconciled`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "days_reconciled",
+                  "displayName": "Days reconciled"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Days reconciled"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_actual",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpi",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "newest_actual_day",
+                      "expression": "`newest_actual_day`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "newest_actual_day",
+                  "displayName": "Newest complete actuals"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Newest complete actuals"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_forecast",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpi",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "newest_forecast_day",
+                      "expression": "`newest_forecast_day`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "newest_forecast_day",
+                  "displayName": "Newest forecast day"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Newest forecast day"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "tomorrow",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "tomorrow",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "target_ts",
+                      "expression": "`target_ts`"
+                    },
+                    {
+                      "name": "predicted_m3",
+                      "expression": "`predicted_m3`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "target_ts",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "target_ts"
+                },
+                "y": {
+                  "fieldName": "predicted_m3",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "forecast m3/h"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest forecast (next day, m3/h)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "fc_actual",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "fc_vs_actual",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "ts",
+                      "expression": "`ts`"
+                    },
+                    {
+                      "name": "m3h",
+                      "expression": "`m3h`"
+                    },
+                    {
+                      "name": "series",
+                      "expression": "`series`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "ts",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "ts"
+                },
+                "y": {
+                  "fieldName": "m3h",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "m3/h"
+                },
+                "color": {
+                  "fieldName": "series",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "series"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Forecast vs actual - last 14 days (m3/h)"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 8,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "daily_mape",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "daily_accuracy",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "forecast_date",
+                      "expression": "`forecast_date`"
+                    },
+                    {
+                      "name": "mape",
+                      "expression": "`mape`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "forecast_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "forecast_date"
+                },
+                "y": {
+                  "fieldName": "mape",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "MAPE %"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Daily MAPE (%)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "daily_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "daily_accuracy",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "forecast_date",
+                      "expression": "`forecast_date`"
+                    },
+                    {
+                      "name": "mape",
+                      "expression": "`mape`"
+                    },
+                    {
+                      "name": "wape",
+                      "expression": "`wape`"
+                    },
+                    {
+                      "name": "bias_pct",
+                      "expression": "`bias_pct`"
+                    },
+                    {
+                      "name": "max_abs_pct_error",
+                      "expression": "`max_abs_pct_error`"
+                    },
+                    {
+                      "name": "hours_scored",
+                      "expression": "`hours_scored`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "forecast_date",
+                    "displayName": "forecast_date",
+                    "title": "forecast_date",
+                    "type": "date",
+                    "displayAs": "datetime",
+                    "visible": true,
+                    "order": 100000,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "mape",
+                    "displayName": "mape",
+                    "title": "mape",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100001,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "wape",
+                    "displayName": "wape",
+                    "title": "wape",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100002,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "bias_pct",
+                    "displayName": "bias_pct",
+                    "title": "bias_pct",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "max_abs_pct_error",
+                    "displayName": "max_abs_pct_error",
+                    "title": "max_abs_pct_error",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100004,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "hours_scored",
+                    "displayName": "hours_scored",
+                    "title": "hours_scored",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100005,
+                    "alignContent": "right"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Daily accuracy"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 15,
+            "width": 3,
+            "height": 7
+          }
+        }
+      ]
+    },
+    {
+      "name": "accuracy",
+      "displayName": "Accuracy detail",
+      "layout": [
+        {
+          "widget": {
+            "name": "hourly_ape",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "hourly_errors",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "target_ts",
+                      "expression": "`target_ts`"
+                    },
+                    {
+                      "name": "abs_pct_error",
+                      "expression": "`abs_pct_error`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "target_ts",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "target_ts"
+                },
+                "y": {
+                  "fieldName": "abs_pct_error",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "abs % error"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Hourly absolute % error"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "hourly_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "hourly_errors",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "target_ts",
+                      "expression": "`target_ts`"
+                    },
+                    {
+                      "name": "predicted_m3",
+                      "expression": "`predicted_m3`"
+                    },
+                    {
+                      "name": "actual_m3",
+                      "expression": "`actual_m3`"
+                    },
+                    {
+                      "name": "error_m3",
+                      "expression": "`error_m3`"
+                    },
+                    {
+                      "name": "abs_pct_error",
+                      "expression": "`abs_pct_error`"
+                    },
+                    {
+                      "name": "model_version",
+                      "expression": "`model_version`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "target_ts",
+                    "displayName": "target_ts",
+                    "title": "target_ts",
+                    "type": "datetime",
+                    "displayAs": "datetime",
+                    "visible": true,
+                    "order": 100000,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "predicted_m3",
+                    "displayName": "predicted_m3",
+                    "title": "predicted_m3",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100001,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "actual_m3",
+                    "displayName": "actual_m3",
+                    "title": "actual_m3",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100002,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "error_m3",
+                    "displayName": "error_m3",
+                    "title": "error_m3",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "abs_pct_error",
+                    "displayName": "abs_pct_error",
+                    "title": "abs_pct_error",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100004,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "model_version",
+                    "displayName": "model_version",
+                    "title": "model_version",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100005,
+                    "alignContent": "left"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Hourly forecast vs actual"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 9
+          }
+        }
+      ]
+    },
+    {
+      "name": "quality",
+      "displayName": "Data quality",
+      "layout": [
+        {
+          "widget": {
+            "name": "dq_bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "dq_summary",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "check",
+                      "expression": "`check`"
+                    },
+                    {
+                      "name": "failed_rows",
+                      "expression": "`failed_rows`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "check",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "check"
+                },
+                "y": {
+                  "fieldName": "failed_rows",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "failed rows"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Rows failing each check (all runs)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "dq_runs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "dq_summary",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "check",
+                      "expression": "`check`"
+                    },
+                    {
+                      "name": "failed_runs",
+                      "expression": "`failed_runs`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "check",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "check"
+                },
+                "y": {
+                  "fieldName": "failed_runs",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "failed runs"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Runs in which each check failed"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 3,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "dq_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "dq_latest",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "checked_at",
+                      "expression": "`checked_at`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "check_name",
+                      "expression": "`check_name`"
+                    },
+                    {
+                      "name": "severity",
+                      "expression": "`severity`"
+                    },
+                    {
+                      "name": "passed",
+                      "expression": "`passed`"
+                    },
+                    {
+                      "name": "failed_rows",
+                      "expression": "`failed_rows`"
+                    },
+                    {
+                      "name": "detail",
+                      "expression": "`detail`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "checked_at",
+                    "displayName": "checked_at",
+                    "title": "checked_at",
+                    "type": "datetime",
+                    "displayAs": "datetime",
+                    "visible": true,
+                    "order": 100000,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "table_name",
+                    "displayName": "table_name",
+                    "title": "table_name",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "check_name",
+                    "displayName": "check_name",
+                    "title": "check_name",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "severity",
+                    "displayName": "severity",
+                    "title": "severity",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "passed",
+                    "displayName": "passed",
+                    "title": "passed",
+                    "type": "boolean",
+                    "displayAs": "boolean",
+                    "visible": true,
+                    "order": 100004,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "failed_rows",
+                    "displayName": "failed_rows",
+                    "title": "failed_rows",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100005,
+                    "alignContent": "right"
+                  },
+                  {
+                    "fieldName": "detail",
+                    "displayName": "detail",
+                    "title": "detail",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100006,
+                    "alignContent": "left"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest quality-gate results"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "quarantine_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "quarantine",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "detected_at",
+                      "expression": "`detected_at`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "reason",
+                      "expression": "`reason`"
+                    },
+                    {
+                      "name": "record_json",
+                      "expression": "`record_json`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "detected_at",
+                    "displayName": "detected_at",
+                    "title": "detected_at",
+                    "type": "datetime",
+                    "displayAs": "datetime",
+                    "visible": true,
+                    "order": 100000,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "table_name",
+                    "displayName": "table_name",
+                    "title": "table_name",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "reason",
+                    "displayName": "reason",
+                    "title": "reason",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "record_json",
+                    "displayName": "record_json",
+                    "title": "record_json",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100003,
+                    "alignContent": "left"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Quarantined rows"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ]
+    },
+    {
+      "name": "models",
+      "displayName": "Models",
+      "layout": [
+        {
+          "widget": {
+            "name": "models_bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "models_latest",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "family",
+                      "expression": "`family`"
+                    },
+                    {
+                      "name": "holdout_mape",
+                      "expression": "`holdout_mape`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "family",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "family"
+                },
+                "y": {
+                  "fieldName": "holdout_mape",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "holdout MAPE %"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest training run - holdout MAPE by candidate (%)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "models_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "models",
+                  "disaggregated": true,
+                  "fields": [
+                    {
+                      "name": "trained_at",
+                      "expression": "`trained_at`"
+                    },
+                    {
+                      "name": "trigger",
+                      "expression": "`trigger`"
+                    },
+                    {
+                      "name": "family",
+                      "expression": "`family`"
+                    },
+                    {
+                      "name": "holdout_mape",
+                      "expression": "`holdout_mape`"
+                    },
+                    {
+                      "name": "holdout_peak_mape",
+                      "expression": "`holdout_peak_mape`"
+                    },
+                    {
+                      "name": "selected",
+                      "expression": "`selected`"
+                    },
+                    {
+                      "name": "promoted",
+                      "expression": "`promoted`"
+                    },
+                    {
+                      "name": "registered_version",
+                      "expression": "`registered_version`"
+                    },
+                    {
+                      "name": "champion_version_before",
+                      "expression": "`champion_version_before`"
+                    },
+                    {
+                      "name": "decision",
+                      "expression": "`decision`"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "trained_at",
+                    "displayName": "trained_at",
+                    "title": "trained_at",
+                    "type": "datetime",
+                    "displayAs": "datetime",
+                    "visible": true,
+                    "order": 100000,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "trigger",
+                    "displayName": "trigger",
+                    "title": "trigger",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100001,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "family",
+                    "displayName": "family",
+                    "title": "family",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100002,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "holdout_mape",
+                    "displayName": "holdout_mape",
+                    "title": "holdout_mape",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100003,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "holdout_peak_mape",
+                    "displayName": "holdout_peak_mape",
+                    "title": "holdout_peak_mape",
+                    "type": "float",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 100004,
+                    "alignContent": "right",
+                    "numberFormat": "0.00"
+                  },
+                  {
+                    "fieldName": "selected",
+                    "displayName": "selected",
+                    "title": "selected",
+                    "type": "boolean",
+                    "displayAs": "boolean",
+                    "visible": true,
+                    "order": 100005,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "promoted",
+                    "displayName": "promoted",
+                    "title": "promoted",
+                    "type": "boolean",
+                    "displayAs": "boolean",
+                    "visible": true,
+                    "order": 100006,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "registered_version",
+                    "displayName": "registered_version",
+                    "title": "registered_version",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100007,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "champion_version_before",
+                    "displayName": "champion_version_before",
+                    "title": "champion_version_before",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100008,
+                    "alignContent": "left"
+                  },
+                  {
+                    "fieldName": "decision",
+                    "displayName": "decision",
+                    "title": "decision",
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 100009,
+                    "alignContent": "left"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Champion / challenger history"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 10
+          }
+        }
+      ]
+    }
+  ]
+}

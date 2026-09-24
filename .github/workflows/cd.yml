@@ -3,6 +3,11 @@ name: CD
 # Merge to main  ->  deploy to QA + run the pipeline there as an integration test
 #                ->  a human approves (GitHub environment "prod" has a required reviewer)
 #                ->  deploy the SAME commit to prod. Prod retrains on prod data (deploy-code).
+#
+# First deployment of an environment: run this workflow manually (Actions > CD > Run workflow) with
+# run_setup = true (bootstrap history, first model, first forecast) and catch_up_days = the number of
+# complete days between the configured history_end and yesterday. Each catch-up iteration is one
+# daily run (land the next complete day, quality gate, features, forecast) followed by monitoring.
 
 on:
   push:
@@ -10,9 +15,17 @@ on:
   workflow_dispatch:
     inputs:
       run_setup:
-        description: "Bootstrap the environment (run the setup job) - first deployment only"
+        description: "Bootstrap the environments (run the setup job) - first deployment only"
         type: boolean
         default: false
+      catch_up_days:
+        description: "Daily runs to replay after deploy (0 = none). Each lands one complete day."
+        type: number
+        default: 0
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   deploy-qa:
@@ -34,8 +47,21 @@ jobs:
         if: ${{ inputs.run_setup }}
         run: databricks bundle run setup -t qa
 
+      - name: Catch up QA to yesterday
+        if: ${{ inputs.catch_up_days > 0 }}
+        run: |
+          for i in $(seq 1 ${{ inputs.catch_up_days }}); do
+            echo "::group::catch-up run $i"
+            databricks bundle run daily_forecast -t qa
+            databricks bundle run monitoring -t qa
+            echo "::endgroup::"
+          done
+
       - name: Integration test - daily pipeline end to end
         run: databricks bundle run daily_forecast -t qa
+
+      - name: Integration test - reconciliation / monitoring
+        run: databricks bundle run monitoring -t qa
 
       - name: Integration test - training, registration and promotion logic
         run: databricks bundle run training -t qa --params trigger=ci
@@ -61,6 +87,19 @@ jobs:
       - name: Bootstrap prod (first time only)
         if: ${{ inputs.run_setup }}
         run: databricks bundle run setup -t prod
+
+      - name: Catch up prod to yesterday
+        if: ${{ inputs.catch_up_days > 0 }}
+        run: |
+          for i in $(seq 1 ${{ inputs.catch_up_days }}); do
+            echo "::group::catch-up run $i"
+            databricks bundle run daily_forecast -t prod
+            databricks bundle run monitoring -t prod
+            echo "::endgroup::"
+          done
+
+      - name: Smoke test - deployed resources
+        run: databricks bundle summary -t prod
 
       - name: Tag release from version.txt
         run: |

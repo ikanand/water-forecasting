@@ -4,7 +4,9 @@ from tests.conftest import ROOT
 from water_forecasting.config import ProjectConfig, Tables
 
 
-@pytest.mark.parametrize("env,catalog", [("dev", "water_dev"), ("qa", "water_qa"), ("prod", "water_prod")])
+@pytest.mark.parametrize(
+    "env,catalog", [("dev", "ewec_demo_dev"), ("qa", "ewec_demo_stage"), ("prod", "ewec_demo_prod")]
+)
 def test_each_env_gets_its_own_catalog(env, catalog):
     cfg = ProjectConfig.from_yaml(ROOT / "project_config.yml", env=env)
     assert cfg.catalog == catalog

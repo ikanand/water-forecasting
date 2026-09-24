@@ -74,24 +74,34 @@ def _dedupe(df: pd.DataFrame, keys: list[str], out: ValidationOutcome, table: st
     return _split(df, dup, out, table, "duplicate_key")
 
 
+def frozen_readings(df: pd.DataFrame, min_hours: int) -> pd.Series:
+    """True for readings inside a run of >= min_hours identical consecutive hourly values (stuck meter).
+    A stuck value sits inside the valid range, so the range check cannot see it."""
+    s = df.sort_values("timestamp_local")
+    same = s.demand_m3h.diff().eq(0) & s.timestamp_local.diff().eq(pd.Timedelta(hours=1))
+    run = (~same).cumsum()
+    run_len = s.groupby(run).demand_m3h.transform("size")
+    return (run_len >= min_hours).reindex(df.index)
+
+
 # ----------------------------------------------------------------- tables ----
-def validate_consumption(df, q: QualityConfig, zones, expected_days: pd.DatetimeIndex, out: ValidationOutcome):
+def validate_consumption(df, q: QualityConfig, expected_days: pd.DatetimeIndex, out: ValidationOutcome):
     t = "consumption"
-    df = _split(df, df[["zone_id", "reading_ts", "consumption_m3"]].isna().any(axis=1), out, t, "null_value")
-    df = _split(df, ~df.zone_id.isin(zones), out, t, "unknown_zone")
+    df = _split(df, df[["timestamp_local", "demand_m3h"]].isna().any(axis=1), out, t, "null_value")
     df = _split(
         df,
-        (df.consumption_m3 < q.consumption_min_m3) | (df.consumption_m3 > q.consumption_max_m3),
+        (df.demand_m3h < q.demand_min_m3h) | (df.demand_m3h > q.demand_max_m3h),
         out,
         t,
         "out_of_range",
     )
-    df = _dedupe(df, ["zone_id", "reading_ts"], out, t)
+    df = _dedupe(df, ["timestamp_local"], out, t)
+    df = _split(df, frozen_readings(df, q.frozen_min_hours), out, t, "frozen_value")
 
     # completeness on the clean rows - a batch-level, blocking check
-    expected = len(zones) * len(expected_days) * 24
-    in_window = df.reading_ts.dt.normalize().isin(expected_days)
-    present = df[in_window].drop_duplicates(["zone_id", "reading_ts"]).shape[0]
+    expected = len(expected_days) * 24
+    in_window = df.timestamp_local.dt.normalize().isin(expected_days)
+    present = df[in_window].drop_duplicates(["timestamp_local"]).shape[0]
     missing = max(expected - present, 0)
     pct = 100 * missing / expected if expected else 0.0
     out.results.append(
@@ -107,60 +117,68 @@ def validate_consumption(df, q: QualityConfig, zones, expected_days: pd.Datetime
     out.clean[t] = df
 
 
-def validate_weather_obs(df, q: QualityConfig, zones, out: ValidationOutcome):
+def validate_weather_obs(df, q: QualityConfig, out: ValidationOutcome):
     t = "weather_obs"
-    df = _split(df, df[["zone_id", "obs_ts", "temperature_c"]].isna().any(axis=1), out, t, "null_value")
+    df = _split(df, df[["timestamp_local", "temperature_c"]].isna().any(axis=1), out, t, "null_value")
     df = _split(
         df, (df.temperature_c < q.temperature_min_c) | (df.temperature_c > q.temperature_max_c), out, t, "out_of_range"
     )
-    out.clean[t] = _dedupe(df, ["zone_id", "obs_ts"], out, t)
+    out.clean[t] = _dedupe(df, ["timestamp_local"], out, t)
 
 
-def validate_weather_fcst(df, q: QualityConfig, zones, target_day: pd.Timestamp | None, out: ValidationOutcome):
-    """The forecast issued the day before `target_day` must cover all 24 hours of it, for every zone."""
+def validate_weather_fcst(df, q: QualityConfig, target_day: pd.Timestamp | None, out: ValidationOutcome):
+    """The forecast vintage issued the day before `target_day` must cover all 24 hours of it."""
     t = "weather_fcst"
-    df = _split(df, df[["zone_id", "issued_at", "target_ts", "temperature_c"]].isna().any(axis=1), out, t, "null_value")
     df = _split(
-        df, (df.temperature_c < q.temperature_min_c) | (df.temperature_c > q.temperature_max_c), out, t, "out_of_range"
+        df,
+        df[["forecast_issued_local", "timestamp_local", "forecast_temperature_c"]].isna().any(axis=1),
+        out,
+        t,
+        "null_value",
     )
-    df = _dedupe(df, ["zone_id", "issued_at", "target_ts"], out, t)
+    df = _split(
+        df,
+        (df.forecast_temperature_c < q.temperature_min_c) | (df.forecast_temperature_c > q.temperature_max_c),
+        out,
+        t,
+        "out_of_range",
+    )
+    df = _dedupe(df, ["forecast_issued_local", "timestamp_local"], out, t)
     if target_day is not None:
         target_day = pd.Timestamp(target_day).normalize()
         issued = target_day - pd.Timedelta(days=1)
-        cov = df[(df.issued_at == issued) & (df.target_ts.dt.normalize() == target_day)]
-        per_zone = cov.groupby("zone_id").target_ts.nunique().reindex(zones, fill_value=0)
-        short = per_zone[per_zone < 24]
+        cov = df[
+            (df.forecast_issued_local.dt.normalize() == issued) & (df.timestamp_local.dt.normalize() == target_day)
+        ]
+        hours = cov.timestamp_local.nunique()
         out.results.append(
             CheckResult(
                 "forecast_horizon_coverage",
                 t,
                 "error",
-                short.empty,
-                int((24 - short).sum()),
-                "ok" if short.empty else f"missing forecast hours for {target_day.date()}: {short.to_dict()}",
+                hours >= 24,
+                max(24 - hours, 0),
+                "ok" if hours >= 24 else f"missing forecast hours for {target_day.date()}: {24 - hours} of 24",
             )
         )
     out.clean[t] = df
 
 
-def validate_calendar(holidays: pd.DataFrame, events: pd.DataFrame, zones, out: ValidationOutcome):
-    out.clean["holidays"] = _dedupe(holidays, ["holiday_date"], out, "holidays")
-    ev = _split(
-        events, (events.end_hour < events.start_hour) | ~events.zone_id.isin(zones), out, "events", "invalid_event"
-    )
-    out.clean["events"] = _dedupe(ev, ["event_id"], out, "events")
+def validate_calendar(df: pd.DataFrame, out: ValidationOutcome):
+    t = "calendar"
+    df = _split(df, df["date"].isna(), out, t, "null_value")
+    out.clean[t] = _dedupe(df, ["date"], out, t)
 
 
 def run_all(
     bronze: dict[str, pd.DataFrame],
     q: QualityConfig,
-    zones: list[str],
     consumption_days: pd.DatetimeIndex,
     forecast_target_day: pd.Timestamp | None,
 ) -> ValidationOutcome:
     out = ValidationOutcome()
-    validate_consumption(bronze["consumption"], q, zones, consumption_days, out)
-    validate_weather_obs(bronze["weather_obs"], q, zones, out)
-    validate_weather_fcst(bronze["weather_fcst"], q, zones, forecast_target_day, out)
-    validate_calendar(bronze["holidays"], bronze["events"], zones, out)
+    validate_consumption(bronze["consumption"], q, consumption_days, out)
+    validate_weather_obs(bronze["weather_obs"], q, out)
+    validate_weather_fcst(bronze["weather_fcst"], q, forecast_target_day, out)
+    validate_calendar(bronze["calendar"], out)
     return out

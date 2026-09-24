@@ -1,4 +1,4 @@
-"""Score tomorrow's 24 hours per zone with @champion and append to gold.demand_forecasts."""
+"""Score tomorrow's 24 hours with @champion and append to gold.demand_forecasts."""
 
 from water_forecasting.lakehouse import get_spark
 from water_forecasting.pipeline import forecast

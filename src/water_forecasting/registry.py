@@ -33,11 +33,15 @@ def use_unity_catalog() -> MlflowClient:
 
 
 def get_alias_version(cfg: ProjectConfig, alias: str):
+    from mlflow.exceptions import RestException
+
     client = use_unity_catalog()
     try:
         return client.get_model_version_by_alias(cfg.registered_model_name, alias)
-    except Exception:  # alias or model does not exist yet
-        return None
+    except RestException as e:
+        if e.error_code in ("RESOURCE_DOES_NOT_EXIST", "ALIAS_DOES_NOT_EXIST"):
+            return None  # alias or model does not exist yet - expected before the first promotion
+        raise  # e.g. PERMISSION_DENIED must not look like "no champion"
 
 
 def load_alias(cfg: ProjectConfig, alias: str):

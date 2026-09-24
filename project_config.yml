@@ -60,6 +60,7 @@ quality:
   temperature_min_c: 0.0
   temperature_max_c: 50.0
   max_missing_hours_pct: 2.0    # blocking: more missing hours than this in a batch stops the pipeline
+  max_missing_hours_abs: 3      # ... or more than this many hours, whichever is looser (protects 1-day batches)
   frozen_min_hours: 3           # >= 3 identical consecutive hourly readings = stuck meter -> quarantine
 
 # history_end = where the one-time setup (backfill) stops. The daily job then lands each following

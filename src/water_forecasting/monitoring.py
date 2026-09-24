@@ -13,7 +13,10 @@ import pandas as pd
 def reconcile(forecasts: pd.DataFrame, actuals: pd.DataFrame, day: pd.Timestamp) -> pd.DataFrame:
     day = pd.Timestamp(day).normalize()
     f = forecasts[forecasts.target_ts.dt.normalize() == day]
-    f = f.sort_values("issued_at").drop_duplicates(["target_ts"], keep="last")
+    # created_at breaks ties between forecasts with the same issued_at (e.g. a same-day re-run) -
+    # the most recently written forecast is the one scored.
+    sort_cols = [c for c in ("issued_at", "created_at") if c in f.columns]
+    f = f.sort_values(sort_cols).drop_duplicates(["target_ts"], keep="last")
     a = actuals.rename(columns={"timestamp_local": "target_ts", "demand_m3h": "actual_m3"})
     df = f.merge(a[["target_ts", "actual_m3"]], on="target_ts", how="inner")
     df["error_m3"] = df.predicted_m3 - df.actual_m3

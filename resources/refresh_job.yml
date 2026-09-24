@@ -7,10 +7,13 @@ resources:
       name: water-forecasting-refresh-from-prod
       tags: { project: water_forecasting, job_type: data_refresh }
       max_concurrent_runs: 1
+      timeout_seconds: 7200
       schedule:
         quartz_cron_expression: "0 0 2 1 1,4,7,10 ?"
         timezone_id: UTC
         pause_status: ${var.refresh_pause_status}
+      email_notifications:
+        on_failure: ["${var.alert_email}"]
       environments:
         - environment_key: default
           spec:

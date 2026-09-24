@@ -104,14 +104,19 @@ def validate_consumption(df, q: QualityConfig, expected_days: pd.DatetimeIndex, 
     present = df[in_window].drop_duplicates(["timestamp_local"]).shape[0]
     missing = max(expected - present, 0)
     pct = 100 * missing / expected if expected else 0.0
+    # An absolute floor keeps a single isolated telemetry gap from blocking a normal one-day batch
+    # (24h * 2% = 0.48h, so any single missing hour would otherwise always block). A real outage still
+    # blocks: max_missing_hours_abs hours is a small fraction of a multi-day backfill batch.
+    allowed_hours = max(q.max_missing_hours_abs, expected * q.max_missing_hours_pct / 100)
     out.results.append(
         CheckResult(
             "hourly_completeness",
             t,
             "error",
-            pct <= q.max_missing_hours_pct,
+            missing <= allowed_hours,
             missing,
-            f"{missing}/{expected} hours missing ({pct:.2f}%, limit {q.max_missing_hours_pct}%)",
+            f"{missing}/{expected} hours missing ({pct:.2f}%, limit {q.max_missing_hours_pct}% "
+            f"or {q.max_missing_hours_abs}h)",
         )
     )
     out.clean[t] = df

@@ -8,6 +8,7 @@ resources:
       name: water-forecasting-monitoring
       tags: { project: water_forecasting, job_type: monitoring }
       max_concurrent_runs: 1
+      timeout_seconds: 3600
       schedule:
         quartz_cron_expression: "0 30 6 * * ?"
         timezone_id: UTC

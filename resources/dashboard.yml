@@ -1,0 +1,12 @@
+# Monitoring dashboard (Databricks AI/BI). One definition, deployed per environment: dataset_catalog points
+# every query at that environment's catalog. Published with the deploying identity's credentials (the
+# environment's service principal in qa/prod), so viewers need only the bundle-wide CAN_VIEW, not table grants.
+# Consequence: a target can only be deployed/validated by its own run_as identity (true in CD).
+resources:
+  dashboards:
+    water_forecasting_dashboard:
+      display_name: "Water demand forecasting (${bundle.target})"
+      file_path: ./dashboards/water_forecasting.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+      dataset_catalog: ${var.catalog}
+      embed_credentials: true

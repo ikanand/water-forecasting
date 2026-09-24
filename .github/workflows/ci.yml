@@ -15,9 +15,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          activate-environment: true   # a project venv; the runner's system Python is externally managed
 
       - name: Install
-        run: uv pip install --system -e ".[test]"
+        run: uv pip install -e ".[test]"
 
       - name: Lint
         run: ruff check . && ruff format --check .
@@ -29,7 +30,10 @@ jobs:
         run: uv build --wheel
 
   validate-bundle:
-    # Catches broken YAML / bad variable references before merge. Uses the QA principal read-only.
+    # Catches broken YAML / bad variable references / missing permissions before merge, against the real
+    # workspace, as the QA principal. Prod is validated by its own principal at deploy time (a target can
+    # only be validated by its run_as identity because its dashboard embeds that identity's credentials);
+    # tests/test_bundle_config.py guards the prod definition in the unit tests above.
     runs-on: ubuntu-latest
     environment: qa
     env:
@@ -39,6 +43,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: databricks/setup-cli@main
-      - name: Validate bundle for every target
-        run: |
-          for t in qa prod; do databricks bundle validate -t "$t"; done
+      - name: Validate the qa bundle
+        run: databricks bundle validate -t qa

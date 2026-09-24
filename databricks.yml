@@ -1,7 +1,7 @@
-# Databricks Asset Bundle: ONE definition of every job, deployed to THREE targets.
-# All targets share one workspace; each environment is isolated by its own Unity Catalog
-# catalog (water_dev / water_qa / water_prod, chosen in project_config.yml by --env)
-# and - in qa/prod - by its own service principal (see README > Security).
+# Databricks Asset Bundle: ONE definition of every job and dashboard, deployed to THREE targets.
+# All targets share one workspace; each environment is isolated by its own Unity Catalog catalog
+# (ewec_demo_dev / ewec_demo_stage / ewec_demo_prod) and - in qa/prod - by its own service principal,
+# which is the only identity with privileges on that catalog (see README > Security).
 
 bundle:
   name: water-forecasting
@@ -22,41 +22,61 @@ variables:
   git_sha:
     description: Commit being deployed (set by CI/CD)
     default: local
+  catalog:
+    description: Unity Catalog catalog of the target - must match project_config.yml (checked by tests)
+    default: ewec_demo_dev
+  warehouse_id:
+    description: SQL warehouse serving the monitoring dashboard
+    lookup:
+      warehouse: Serverless Starter Warehouse
   schedule_pause_status:
-    description: Daily/weekly crons. PAUSED except in prod - dev/qa run on demand.
+    description: Daily/weekly crons. PAUSED except in prod - dev/qa run on demand and from CD.
     default: PAUSED
   refresh_pause_status:
     description: Quarterly prod->lower-env refresh. Runs in qa only (dev mode pauses all schedules).
     default: PAUSED
   alert_email:
-    description: Who gets paged when a job fails or a quality gate blocks the pipeline
-    default: mlops-alerts@example.com
+    description: Who is notified when a job fails or a quality gate blocks the pipeline
+    default: kakaraddianand@gmail.com
+
+permissions:
+  - level: CAN_VIEW
+    group_name: users
+  - level: CAN_MANAGE
+    group_name: admins
 
 targets:
   dev:
     mode: development          # prefixes resources with [dev <user>], pauses all schedules
     default: true
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com
+      host: https://dbc-b9cbb106-0455.cloud.databricks.com
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
 
   qa:
     mode: production
+    git:
+      branch: main             # only code merged to main is deployed beyond dev
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com   # same workspace, different catalog
+      host: https://dbc-b9cbb106-0455.cloud.databricks.com   # same workspace, different catalog
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: 44a66753-c0cf-4dee-b50f-3fa80613631b   # sp-water-qa
     variables:
+      catalog: ewec_demo_stage
       refresh_pause_status: UNPAUSED
-    # Deployed by the QA service principal from GitHub Actions (environment "qa").
+    # Deployed by sp-water-qa from GitHub Actions (environment "qa").
 
   prod:
     mode: production
+    git:
+      branch: main
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com
+      host: https://dbc-b9cbb106-0455.cloud.databricks.com
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: 2e04927f-3610-4419-a350-472be50670aa   # sp-water-prod
     variables:
+      catalog: ewec_demo_prod
       schedule_pause_status: UNPAUSED    # only prod runs on a live schedule
-    # Deployed by the PROD service principal (GitHub environment "prod", manual approval).
-    # Jobs run as the deploying identity; to pin it explicitly:
-    # run_as:
-    #   service_principal_name: <prod-sp-application-id>
+    # Deployed by sp-water-prod from GitHub Actions (environment "prod", manual approval).

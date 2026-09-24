@@ -1,12 +1,30 @@
-"""The two automated MLOps decisions, as small pure functions with unit tests.
+"""The automated MLOps decisions, as small pure functions with unit tests.
 
-* should_promote - does the newly trained challenger replace the champion?
-* needs_retrain  - has live accuracy degraded enough to retrain now?
+* fair_comparison_window - which holdout hours can champion and challenger be compared on?
+* should_promote         - does the newly trained challenger replace the champion?
+* needs_retrain          - has live accuracy degraded enough to retrain now?
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+
+import pandas as pd
+
+
+def fair_comparison_window(
+    target_ts: pd.Series, champion_trained_through: str | pd.Timestamp | None, min_days: int = 7
+) -> tuple[pd.Series | None, str]:
+    """Mask of holdout hours the champion has NOT seen in its own training - or None if fewer than
+    `min_days` such days exist. Comparing on hours the champion was trained on flatters it (in-sample
+    error) and would block every promotion for weeks after each promotion."""
+    if champion_trained_through is None or pd.isna(pd.Timestamp(champion_trained_through)):
+        return pd.Series(True, index=target_ts.index), "champion has no trained_through tag - full holdout"
+    mask = target_ts > pd.Timestamp(champion_trained_through)
+    days = target_ts[mask].dt.normalize().nunique()
+    if days < min_days:
+        return None, f"only {days} holdout day(s) after the champion's training end (< {min_days}) - keep champion"
+    return mask, f"compared on {days} holdout days unseen by the champion"
 
 
 def should_promote(

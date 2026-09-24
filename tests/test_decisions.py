@@ -1,4 +1,24 @@
-from water_forecasting.decisions import needs_retrain, should_promote
+import pandas as pd
+
+from water_forecasting.decisions import fair_comparison_window, needs_retrain, should_promote
+
+HOLDOUT = pd.Series(pd.date_range("2026-08-27", "2026-09-23 23:00", freq="h"))
+
+
+def test_champion_is_judged_only_on_hours_it_never_saw():
+    mask, note = fair_comparison_window(HOLDOUT, "2026-09-10 23:00", min_days=7)
+    assert mask is not None and HOLDOUT[mask].min() == pd.Timestamp("2026-09-11")
+    assert "13 holdout days" in note
+
+
+def test_too_few_unseen_days_keeps_the_champion():
+    mask, note = fair_comparison_window(HOLDOUT, "2026-09-19 23:00", min_days=7)
+    assert mask is None and "keep champion" in note
+
+
+def test_untagged_champion_uses_the_full_holdout():
+    mask, _ = fair_comparison_window(HOLDOUT, None)
+    assert mask.all()
 
 
 def test_first_model_is_promoted_if_acceptable():

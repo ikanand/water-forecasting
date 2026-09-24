@@ -2,10 +2,10 @@
 # Scripts load it with ProjectConfig.from_yaml(path, env) where env = ${bundle.target}.
 
 project_name: water_forecasting
-zones: [north, central, south]          # supply zones / DMAs being forecast
+# Single site (city-wide aggregate demand) - no zone/DMA dimension. See source.warehouse below.
 
 schemas:
-  landing: landing        # mock "source systems" (SCADA meters, weather API, calendars)
+  landing: landing        # raw pull from the source catalog (SCADA meters, weather, calendar)
   bronze: bronze          # raw, append-only, + _ingested_at / _batch_id
   silver: silver          # validated, deduplicated, conformed hourly grid
   gold: gold              # feature table + forecasts
@@ -13,19 +13,27 @@ schemas:
   monitoring: monitoring  # DQ results, quarantine, accuracy, model selection leaderboard
 
 source:
-  mode: synthetic         # synthetic | files  (files = replay your own CSVs from a UC volume)
-  files_volume: raw_files # /Volumes/<catalog>/landing/<files_volume>/*.csv when mode=files
-  seed: 42
-  inject_anomaly_rate: 0.002   # tiny rate of duplicates / negatives so quarantine has something to show
+  mode: warehouse          # warehouse | files  (files = replay your own CSVs from a UC volume)
+  files_volume: raw_files  # /Volumes/<catalog>/landing/<files_volume>/*.csv when mode=files
+  warehouse:               # mode=warehouse: pull straight from another catalog's raw tables,
+    catalog: mlops_dev     # treating it as "the source system" - same real Dubai demand data
+    schema: bronze         # feeds dev/qa/prod alike, sliced by each env's history window.
+    consumption_table: dubai_water_demand_hourly_raw
+    weather_obs_table: dubai_weather_hourly_raw
+    weather_fcst_table: dubai_weather_forecast_hourly_raw
+    calendar_table: uae_calendar_events_daily_raw
 
 forecast:
-  issue_hour_utc: 5       # forecasts are issued at 05:00 for the whole of tomorrow
+  timezone: Asia/Dubai    # local calendar of the source data; "today" and complete days follow it
+  issue_hour_utc: 5       # forecasts are issued at 05:00 UTC (09:00 Dubai) for the whole of tomorrow
   horizon_hours: 24
   min_lag_hours: 48       # lags must be >= 48h: at issue time the newest complete day is D-1
 
 model:
   registered_model: water_demand_forecast
-  candidates: [seasonal_naive_168, ridge_fourier, lightgbm]
+  # Every weekly training fits all candidates and keeps the best on a fresh holdout.
+  # Evidence for the growth-aware candidates: notebooks/02_modelling.ipynb.
+  candidates: [seasonal_naive_168, ridge_fourier, lightgbm, lightgbm_trend, ridge_interactions, blend_ridge_lgbm]
   holdout_days: 28
   ridge_alpha: 1.0
   lgbm_params:
@@ -44,30 +52,38 @@ decisions:
   max_acceptable_mape: 15.0     # never promote a model worse than this, even with no champion
   degradation_factor: 1.25      # retrain when daily MAPE > 1.25 x champion holdout MAPE ...
   degradation_days: 3           # ... for 3 consecutive days
+  min_fresh_days: 7             # champion vs challenger only on >= 7 holdout days the champion never trained on
 
 quality:
-  consumption_min_m3: 0.0
-  consumption_max_m3: 20000.0
-  temperature_min_c: -30.0
+  demand_min_m3h: 0.0
+  demand_max_m3h: 200000.0      # normal range is ~64k-168k m3/h city-wide; catches injected spikes (~236k+)
+  temperature_min_c: 0.0
   temperature_max_c: 50.0
   max_missing_hours_pct: 2.0    # blocking: more missing hours than this in a batch stops the pipeline
+  frozen_min_hours: 3           # >= 3 identical consecutive hourly readings = stuck meter -> quarantine
 
+# history_end = where the one-time setup (backfill) stops. The daily job then lands each following
+# complete day, one per run, until it reaches yesterday - and from then on runs in real time.
+# qa/prod stop at 2026-09-19 (go-live was 2026-09-23), so their first daily runs re-issue the forecasts
+# of 2026-09-20..22 and the monitoring tables hold forecast errors for the days before go-live.
+# dev is the replay sandbox: after a reset it restarts from 2026-06-30 and every daily run lands one more
+# historical day, so fault drills (--params fault=...) can be demonstrated at any time.
 environments:
   dev:
-    catalog: water_dev
-    history_start: "2025-03-01"   # small slice: fast iteration
-    history_end: "2025-12-31"
+    catalog: ewec_demo_dev
+    history_start: "2026-01-01"   # small slice: fast iteration
+    history_end: "2026-06-30"
   qa:
-    catalog: water_qa
-    history_start: "2024-09-01"   # >= 1 full seasonal cycle so tests cover summer and winter
-    history_end: "2025-12-31"
+    catalog: ewec_demo_stage
+    history_start: "2024-09-15"   # 2 years: growth-aware models need >= 18 months to behave as in prod
+    history_end: "2026-09-19"
   prod:
-    catalog: water_prod
-    history_start: "2023-01-01"   # full history
-    history_end: "2025-12-31"
+    catalog: ewec_demo_prod
+    history_start: "2024-01-01"   # full history (earliest available in the source data)
+    history_end: "2026-09-19"
 
 refresh:                          # quarterly prod -> dev/qa subset copy (see resources/refresh_job.yml)
-  source_catalog: water_prod
+  source_catalog: ewec_demo_prod
   lookback_days:
     dev: 180
-    qa: 400
+    qa: 730

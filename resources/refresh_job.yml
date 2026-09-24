@@ -1,6 +1,6 @@
 # Quarterly (1 Jan/Apr/Jul/Oct): copy a recent, contiguous window of PROD silver into this
 # environment, rebuild features and retrain, so dev/qa test on realistic, frozen data.
-# No-op in prod. The dev/qa principal needs SELECT on water_prod.silver only (see README).
+# No-op in prod. The dev/qa principal needs SELECT on ewec_demo_prod.silver only (see README).
 resources:
   jobs:
     refresh_from_prod:

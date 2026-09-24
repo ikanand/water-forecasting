@@ -20,14 +20,27 @@ class Schemas(BaseModel):
     monitoring: str = "monitoring"
 
 
+class WarehouseSourceConfig(BaseModel):
+    """mode=warehouse: another Unity Catalog catalog treated as the raw source system."""
+
+    catalog: str = "mlops_dev"
+    schema_: str = Field("bronze", alias="schema")
+    consumption_table: str = "dubai_water_demand_hourly_raw"
+    weather_obs_table: str = "dubai_weather_hourly_raw"
+    weather_fcst_table: str = "dubai_weather_forecast_hourly_raw"
+    calendar_table: str = "uae_calendar_events_daily_raw"
+
+    model_config = {"populate_by_name": True}
+
+
 class SourceConfig(BaseModel):
-    mode: Literal["synthetic", "files"] = "synthetic"
+    mode: Literal["warehouse", "files"] = "warehouse"
     files_volume: str = "raw_files"
-    seed: int = 42
-    inject_anomaly_rate: float = 0.0
+    warehouse: WarehouseSourceConfig = Field(default_factory=WarehouseSourceConfig)
 
 
 class ForecastConfig(BaseModel):
+    timezone: str = "Asia/Dubai"  # local time of the source data and of "today"
     issue_hour_utc: int = 5
     horizon_hours: int = 24
     min_lag_hours: int = 48
@@ -46,37 +59,36 @@ class DecisionConfig(BaseModel):
     max_acceptable_mape: float = 15.0
     degradation_factor: float = 1.25
     degradation_days: int = 3
+    min_fresh_days: int = 7
 
 
 class QualityConfig(BaseModel):
-    consumption_min_m3: float = 0.0
-    consumption_max_m3: float = 20000.0
-    temperature_min_c: float = -30.0
+    demand_min_m3h: float = 0.0
+    demand_max_m3h: float = 200000.0
+    temperature_min_c: float = 0.0
     temperature_max_c: float = 50.0
     max_missing_hours_pct: float = 2.0
+    frozen_min_hours: int = 3
 
 
 class Tables:
     """Logical table names -> (schema key, table name)."""
 
-    # landing = the mock source systems
-    LANDING_CONSUMPTION = ("landing", "consumption_readings")
-    LANDING_WEATHER_OBS = ("landing", "weather_observations")
-    LANDING_WEATHER_FCST = ("landing", "weather_forecasts")
-    LANDING_HOLIDAYS = ("landing", "holidays")
-    LANDING_EVENTS = ("landing", "events")
+    # landing = raw pull from the source catalog, as-received
+    LANDING_CONSUMPTION = ("landing", "water_demand_hourly")
+    LANDING_WEATHER_OBS = ("landing", "weather_hourly")
+    LANDING_WEATHER_FCST = ("landing", "weather_forecast_hourly")
+    LANDING_CALENDAR = ("landing", "calendar_daily")
     # bronze = raw + lineage columns
-    BRONZE_CONSUMPTION = ("bronze", "consumption_readings")
-    BRONZE_WEATHER_OBS = ("bronze", "weather_observations")
-    BRONZE_WEATHER_FCST = ("bronze", "weather_forecasts")
-    BRONZE_HOLIDAYS = ("bronze", "holidays")
-    BRONZE_EVENTS = ("bronze", "events")
+    BRONZE_CONSUMPTION = ("bronze", "water_demand_hourly")
+    BRONZE_WEATHER_OBS = ("bronze", "weather_hourly")
+    BRONZE_WEATHER_FCST = ("bronze", "weather_forecast_hourly")
+    BRONZE_CALENDAR = ("bronze", "calendar_daily")
     # silver = validated
-    SILVER_CONSUMPTION = ("silver", "consumption_hourly")
-    SILVER_WEATHER_OBS = ("silver", "weather_obs_hourly")
+    SILVER_CONSUMPTION = ("silver", "demand_hourly")
+    SILVER_WEATHER_OBS = ("silver", "weather_hourly")
     SILVER_WEATHER_FCST = ("silver", "weather_forecast_hourly")
-    SILVER_HOLIDAYS = ("silver", "holidays")
-    SILVER_EVENTS = ("silver", "events")
+    SILVER_CALENDAR = ("silver", "calendar_daily")
     # gold
     FEATURES = ("gold", "demand_features")
     FORECASTS = ("gold", "demand_forecasts")
@@ -93,8 +105,7 @@ BRONZE_FLOW = {
     "consumption": (Tables.LANDING_CONSUMPTION, Tables.BRONZE_CONSUMPTION),
     "weather_obs": (Tables.LANDING_WEATHER_OBS, Tables.BRONZE_WEATHER_OBS),
     "weather_fcst": (Tables.LANDING_WEATHER_FCST, Tables.BRONZE_WEATHER_FCST),
-    "holidays": (Tables.LANDING_HOLIDAYS, Tables.BRONZE_HOLIDAYS),
-    "events": (Tables.LANDING_EVENTS, Tables.BRONZE_EVENTS),
+    "calendar": (Tables.LANDING_CALENDAR, Tables.BRONZE_CALENDAR),
 }
 
 
@@ -102,7 +113,6 @@ class ProjectConfig(BaseModel):
     env: Literal["dev", "qa", "prod"]
     project_name: str
     catalog: str
-    zones: list[str]
     history_start: str
     history_end: str
     schemas: Schemas = Field(default_factory=Schemas)
@@ -111,7 +121,7 @@ class ProjectConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     decisions: DecisionConfig = Field(default_factory=DecisionConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
-    refresh_source_catalog: str = "water_prod"
+    refresh_source_catalog: str = "ewec_demo_prod"
     refresh_lookback_days: int | None = None
 
     @classmethod
@@ -125,7 +135,7 @@ class ProjectConfig(BaseModel):
             env=env,
             **raw,
             **env_block,
-            refresh_source_catalog=refresh.get("source_catalog", "water_prod"),
+            refresh_source_catalog=refresh.get("source_catalog", "ewec_demo_prod"),
             refresh_lookback_days=(refresh.get("lookback_days") or {}).get(env),
         )
 
